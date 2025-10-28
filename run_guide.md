@@ -11,4 +11,4 @@ python deploy_model.py --project_id sentiment-demo-476518 --region us-central1 -
 python inference_model.py --project_id sentiment-demo-476518 --region us-central1 --endpoint_id 6638806128534749184 --texts "I love my school" "This exam is terrible" "Homework ruined my weekend"
 
 # Shutdown
-python shutdown_mode.py --project_id sentiment-demo-476518 --region us-central1 --endpoint_id 6638806128534749184 --delete_endpoint --delete_model
+python shutdown_model.py --project_id sentiment-demo-476518 --region us-central1 --endpoint_id 6638806128534749184 --delete_endpoint --delete_model

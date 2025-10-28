@@ -16,3 +16,4 @@ gsutil iam ch serviceAccount:service-%PROJECT_NUMBER%@gcp-sa-aiplatform-cc.iam.g
 
 # Grant bucket-level access to the training job runtime SA (compute default)
 gsutil iam ch serviceAccount:%PROJECT_NUMBER%-compute@developer.gserviceaccount.com:roles/storage.objectAdmin gs://%BUCKET%
+

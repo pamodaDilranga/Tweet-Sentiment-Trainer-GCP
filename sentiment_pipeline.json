@@ -1,0 +1,331 @@
+{
+  "components": {
+    "comp-launch-training-job": {
+      "executorLabel": "exec-launch-training-job",
+      "inputDefinitions": {
+        "parameters": {
+          "bucket": {
+            "parameterType": "STRING"
+          },
+          "data_uri": {
+            "parameterType": "STRING"
+          },
+          "machine_type": {
+            "defaultValue": "n1-standard-4",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "model_name": {
+            "parameterType": "STRING"
+          },
+          "project_id": {
+            "parameterType": "STRING"
+          },
+          "region": {
+            "parameterType": "STRING"
+          },
+          "staging_bucket": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "Output": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-test-predict": {
+      "executorLabel": "exec-test-predict",
+      "inputDefinitions": {
+        "parameters": {
+          "endpoint_id": {
+            "parameterType": "STRING"
+          },
+          "project_id": {
+            "parameterType": "STRING"
+          },
+          "region": {
+            "parameterType": "STRING"
+          },
+          "text1": {
+            "defaultValue": "I love my school",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "text2": {
+            "defaultValue": "This exam is terrible",
+            "isOptional": true,
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "Output": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-upload-and-deploy-model": {
+      "executorLabel": "exec-upload-and-deploy-model",
+      "inputDefinitions": {
+        "parameters": {
+          "artifact_dir": {
+            "parameterType": "STRING"
+          },
+          "display_name": {
+            "defaultValue": "sentiment-model",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "endpoint_name": {
+            "defaultValue": "sentiment-endpoint",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "machine_type": {
+            "defaultValue": "n1-standard-2",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "project_id": {
+            "parameterType": "STRING"
+          },
+          "region": {
+            "parameterType": "STRING"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "Output": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    }
+  },
+  "deploymentSpec": {
+    "executors": {
+      "exec-launch-training-job": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "launch_training_job"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform>=1.63.0' 'google-cloud-storage>=2.16.0' 'pandas==2.2.3' 'scikit-learn==1.6.1' 'joblib==1.4.2'  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.14.6' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef launch_training_job(\n    project_id: str,\n    region: str,\n    staging_bucket: str,            # e.g., gs://sentiment-demo-bucket\n    data_uri: str,                  # e.g., gs://sentiment-demo-bucket/data/tweets.csv\n    bucket: str,                    # e.g., sentiment-demo-bucket\n    model_name: str,                # e.g., sentiment-v1\n    machine_type: str = \"n1-standard-4\",\n) -> str:\n    \"\"\"Submits a Vertex AI CustomTrainingJob that trains and uploads to gs://BUCKET/models/MODEL_NAME/.\n    Returns the artifact_dir (gs://.../models/MODEL_NAME/).\"\"\"\n\n    # Write the training script on the fly so we can autopackage\n    TRAIN_SCRIPT = r\"\"\"\nimport argparse, os\nimport pandas as pd\nimport joblib\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.feature_extraction.text import CountVectorizer\nfrom sklearn.naive_bayes import MultinomialNB\nfrom google.cloud import storage\n\ndef upload_to_gcs(local_path: str, gcs_uri: str):\n    assert gcs_uri.startswith(\"gs://\"), \"gcs_uri must start with gs://\"\n    _, rest = gcs_uri.split(\"gs://\", 1)\n    bucket_name, blob_name = rest.split(\"/\", 1)\n    client = storage.Client()\n    bucket = client.bucket(bucket_name)\n    bucket.blob(blob_name).upload_from_filename(local_path)\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument(\"--data_uri\", required=True)\n    ap.add_argument(\"--bucket\", required=True)\n    ap.add_argument(\"--model_name\", required=True)\n    args = ap.parse_args()\n\n    print(f\"[INFO] Reading dataset from: {args.data_uri}\")\n    df = pd.read_csv(args.data_uri)\n    assert \"text\" in df.columns and \"label\" in df.columns, \"CSV must have columns: text,label\"\n\n    pipe = Pipeline([(\"vec\", CountVectorizer()), (\"clf\", MultinomialNB())])\n    pipe.fit(df[\"text\"], df[\"label\"])\n\n    os.makedirs(\"/tmp/model\", exist_ok=True)\n    local_path = \"/tmp/model/model.joblib\"\n    joblib.dump(pipe, local_path)\n\n    artifact_uri = f\"gs://{args.bucket}/models/{args.model_name}/model.joblib\"\n    print(f\"[INFO] Uploading model artifact to: {artifact_uri}\")\n    upload_to_gcs(local_path, artifact_uri)\n    print(f\"[RESULT] ARTIFACT_DIR=gs://{args.bucket}/models/{args.model_name}/\")\n\nif __name__ == \"__main__\":\n    main()\n\"\"\"\n    import textwrap\n    with open(\"train_model_inline.py\", \"w\", encoding=\"utf-8\") as f:\n        f.write(textwrap.dedent(TRAIN_SCRIPT))\n\n    from google.cloud import aiplatform\n    aiplatform.init(project=project_id, location=region, staging_bucket=staging_bucket)\n\n    job = aiplatform.CustomTrainingJob(\n        display_name=f\"train-{model_name}\",\n        script_path=\"train_model_inline.py\",\n        container_uri=TRAIN_IMAGE,\n        requirements=[\n            \"google-cloud-storage>=2.16.0\",\n            \"pandas==2.2.3\",\n            \"scikit-learn==1.6.1\",\n            \"joblib==1.4.2\",\n        ],\n    )\n\n    job.run(\n        args=[\"--data_uri\", data_uri, \"--bucket\", bucket, \"--model_name\", model_name],\n        replica_count=1,\n        machine_type=machine_type,\n    )\n\n    # Vertex AI training wrote to gs://{bucket}/models/{model_name}/ via the script.\n    artifact_dir = f\"gs://{bucket}/models/{model_name}/\"\n    print(\"[PIPELINE] artifact_dir:\", artifact_dir)\n    return artifact_dir\n\n"
+          ],
+          "image": "python:3.10"
+        }
+      },
+      "exec-test-predict": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "test_predict"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform>=1.63.0'  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.14.6' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef test_predict(\n    project_id: str,\n    region: str,\n    endpoint_id: str,\n    text1: str = \"I love my school\",\n    text2: str = \"This exam is terrible\",\n) -> str:\n    \"\"\"Runs a quick prediction to verify the deployment.\"\"\"\n    from google.cloud import aiplatform\n    aiplatform.init(project=project_id, location=region)\n\n    endpoint = aiplatform.Endpoint(\n        endpoint_name=f\"projects/{project_id}/locations/{region}/endpoints/{endpoint_id}\"\n    )\n    pred = endpoint.predict(instances=[text1, text2])\n    print(\"[RESULT] predictions:\", pred.predictions)\n    return str(pred.predictions)\n\n"
+          ],
+          "image": "python:3.10"
+        }
+      },
+      "exec-upload-and-deploy-model": {
+        "container": {
+          "args": [
+            "--executor_input",
+            "{{$}}",
+            "--function_to_execute",
+            "upload_and_deploy_model"
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip || python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform>=1.63.0'  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.14.6' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\n",
+            "sh",
+            "-ec",
+            "program_path=$(mktemp -d)\n\nprintf \"%s\" \"$0\" > \"$program_path/ephemeral_component.py\"\n_KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         \"$program_path/ephemeral_component.py\"                         \"$@\"\n",
+            "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import *\n\ndef upload_and_deploy_model(\n    project_id: str,\n    region: str,\n    artifact_dir: str,                 # output of training step, ends with '/models/<name>/'\n    display_name: str = \"sentiment-model\",\n    endpoint_name: str = \"sentiment-endpoint\",\n    machine_type: str = \"n1-standard-2\",\n) -> str:\n    \"\"\"Uploads the sklearn model from artifact_dir and deploys it to an endpoint. Returns endpoint_id.\"\"\"\n    from google.cloud import aiplatform\n\n    aiplatform.init(project=project_id, location=region)\n\n    print(f\"[INFO] Uploading model from: {artifact_dir}\")\n    model = aiplatform.Model.upload(\n        display_name=display_name,\n        artifact_uri=artifact_dir,\n        serving_container_image_uri=PRED_IMAGE,\n        serving_container_health_route=\"/ping\",\n        serving_container_predict_route=\"/predict\",\n    )\n    print(f\"[INFO] Model uploaded: {model.resource_name}\")\n\n    # Create endpoint (new endpoint each run; adjust if you want to reuse)\n    endpoint = aiplatform.Endpoint.create(display_name=endpoint_name)\n    print(f\"[INFO] Endpoint created: {endpoint.resource_name}\")\n\n    endpoint = model.deploy(\n        endpoint=endpoint,\n        machine_type=machine_type,\n        traffic_split={\"0\": 100},\n    )\n    endpoint_id = endpoint.name.split(\"/\")[-1]\n    print(f\"[RESULT] ENDPOINT_ID={endpoint_id}\")\n    return endpoint_id\n\n"
+          ],
+          "image": "python:3.10"
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "description": "Train scikit-learn on Vertex AI, upload, deploy, and test-predict.",
+    "name": "sentiment-train-deploy-pipeline"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "launch-training-job": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-launch-training-job"
+          },
+          "inputs": {
+            "parameters": {
+              "bucket": {
+                "componentInputParameter": "bucket"
+              },
+              "data_uri": {
+                "componentInputParameter": "data_uri"
+              },
+              "model_name": {
+                "componentInputParameter": "model_name"
+              },
+              "project_id": {
+                "componentInputParameter": "project_id"
+              },
+              "region": {
+                "componentInputParameter": "region"
+              },
+              "staging_bucket": {
+                "componentInputParameter": "staging_bucket"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "launch-training-job"
+          }
+        },
+        "test-predict": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-test-predict"
+          },
+          "dependentTasks": [
+            "upload-and-deploy-model"
+          ],
+          "inputs": {
+            "parameters": {
+              "endpoint_id": {
+                "taskOutputParameter": {
+                  "outputParameterKey": "Output",
+                  "producerTask": "upload-and-deploy-model"
+                }
+              },
+              "project_id": {
+                "componentInputParameter": "project_id"
+              },
+              "region": {
+                "componentInputParameter": "region"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "test-predict"
+          }
+        },
+        "upload-and-deploy-model": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-upload-and-deploy-model"
+          },
+          "dependentTasks": [
+            "launch-training-job"
+          ],
+          "inputs": {
+            "parameters": {
+              "artifact_dir": {
+                "taskOutputParameter": {
+                  "outputParameterKey": "Output",
+                  "producerTask": "launch-training-job"
+                }
+              },
+              "display_name": {
+                "componentInputParameter": "display_name"
+              },
+              "endpoint_name": {
+                "componentInputParameter": "endpoint_name"
+              },
+              "project_id": {
+                "componentInputParameter": "project_id"
+              },
+              "region": {
+                "componentInputParameter": "region"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "upload-and-deploy-model"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "bucket": {
+          "defaultValue": "sentiment-demo-bucket",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "data_uri": {
+          "defaultValue": "gs://sentiment-demo-bucket/data/tweets.csv",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "display_name": {
+          "defaultValue": "sentiment-model",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "endpoint_name": {
+          "defaultValue": "sentiment-endpoint",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "model_name": {
+          "defaultValue": "sentiment-v1",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "project_id": {
+          "defaultValue": "sentiment-demo-476518",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "region": {
+          "defaultValue": "us-central1",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "staging_bucket": {
+          "defaultValue": "gs://sentiment-demo-bucket",
+          "isOptional": true,
+          "parameterType": "STRING"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.14.6"
+}
